@@ -38,3 +38,7 @@ If you use the code in your work, please use the following citation:
   publisher={Newcastle University}
 }
 ```
+
+### To create the environment:
+`conda env create -f environment.yaml`
+
