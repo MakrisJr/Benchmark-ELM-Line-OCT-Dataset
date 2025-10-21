@@ -1,0 +1,7 @@
+# ignore dataset folders
+train/*
+val/*
+
+# ignore python cache files
+__pycache__/
+*.pyc
