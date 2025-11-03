@@ -27,7 +27,7 @@ model = SegNet(n_channels=3, n_classes=1)
 if torch.cuda.is_available():
     model.cuda()
 
-model.load_state_dict(torch.load('/home/vivek/Documents/ELMseg/checkpoint/fold5.model'))
+model.load_state_dict(torch.load('checkpoint/model_epoch.pth'))
 
 def is_image_file(filename):
     return any(filename.endswith(extension) for extension in [".png", ".jpg", ".jpeg"])

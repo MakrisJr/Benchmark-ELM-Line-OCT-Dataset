@@ -22,6 +22,15 @@ class BasicDataset(Dataset):
                     if not file.startswith('.')]
         self.mask_ids = [splitext(file)[0] for file in listdir(masks_dir)
                     if not file.startswith('.')]
+
+        # sort the lists
+        self.im_ids.sort()
+        self.mask_ids.sort()
+
+        for im_id,mask_id in zip(self.im_ids,self.mask_ids):
+            assert im_id == mask_id, \
+                f'Images and masks {im_id} should be the same ID'
+        
         logging.info(f'Creating dataset with {len(self.im_ids)} examples')
         self.transform=transform
 
@@ -56,10 +65,13 @@ class BasicDataset(Dataset):
         mask_file = glob(self.masks_dir + mask_idx + '.*')
         img_file = glob(self.imgs_dir + im_idx + '.*')
 
-        assert len(mask_file) == 1, \
-            f'Either no mask or multiple masks found for the ID {mask_idx}: {mask_file}'
-        assert len(img_file) == 1, \
-            f'Either no image or multiple images found for the ID {im_idx}: {img_file}'
+        # print(f"Loading image {img_file} and mask {mask_file}")
+        # print(f"dimensions: image {Image.open(img_file[0]).size}, mask {Image.open(mask_file[0]).size}")
+
+        # assert len(mask_file) == 1, \
+            # f'Either no mask or multiple masks found for the ID {mask_idx}: {mask_file}'
+        # assert len(img_file) == 1, \
+            # f'Either no image or multiple images found for the ID {im_idx}: {img_file}'
         mask = Image.open(mask_file[0])
         img = Image.open(img_file[0])
 
