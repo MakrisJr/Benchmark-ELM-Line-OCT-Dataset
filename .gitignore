@@ -4,6 +4,7 @@ val/
 test/
 data_original/
 runs/
+checkpoint/
 
 # ignore python cache files
 __pycache__/

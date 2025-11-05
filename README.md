@@ -42,3 +42,8 @@ If you use the code in your work, please use the following citation:
 ### To create the environment:
 `conda env create -f environment.yaml`
 
+### File guide: 
+- dataset.py: BasicDataset class, returns {image, mask} items
+- dice_loss.py: implements dice coefficient and dice loss
+- 
+
