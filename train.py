@@ -65,7 +65,10 @@ def train_net(net,
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True, drop_last=True)
 
-    writer = SummaryWriter(comment=f'LR_{lr}_BS_{batch_size}_SCALE_{img_scale}')
+    MODEL_NAME = f'ELM_{time.strftime("%b-%d-%Y_%H%M")}.model'
+
+    writer = SummaryWriter(logdir=f'{MODEL_NAME}/logs', comment=f'LR_{lr}_BS_{batch_size}_SCALE_{img_scale}')
+    print('TensorBoard logs writing to:', writer.logdir)
     global_step = 0
 
     logging.info(f'''Starting training:
@@ -98,7 +101,7 @@ def train_net(net,
 
         epoch_loss = 0
         with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img') as pbar:
-            for batch in train_loader:
+            for ibatch, batch in enumerate(train_loader):
                 imgs = batch['image']
                 true_masks = batch['mask']
                 imgs = imgs.to(device=device, dtype=torch.float32)
@@ -124,6 +127,8 @@ def train_net(net,
                 loss_values.append(epoch_loss)   
                 List_Loss.append([epoch, epoch_loss])
 
+                if epoch == 0 and ibatch == 1:
+                    print_gpu_mem(device)
                 pbar.update(imgs.shape[0])
                 global_step += 1
                 if global_step % ((n_val+n_train) // (10 * batch_size)) == 0:
@@ -158,9 +163,9 @@ def train_net(net,
         except OSError:
             pass
         net.load_state_dict(best_model_wts)
-        t = time.localtime()
-        timestamp = time.strftime('%b-%d-%Y_%H%M', t)
-        torch.save(net.state_dict(), '{}ELM_{}.model'.format(dir_checkpoint,timestamp))
+        # t = time.localtime()
+        # timestamp = time.strftime('%b-%d-%Y_%H%M', t)
+        torch.save(net.state_dict(), '{}{}.model'.format(dir_checkpoint, MODEL_NAME))
 
     writer.close()
 
@@ -181,6 +186,25 @@ def get_args():
                         help='Percent of the data that is used as validation (0-100)')
 
     return parser.parse_args()
+
+
+def mb(x): return x / 1024**2
+
+def print_gpu_mem(device=None, prefix=''):
+    if not torch.cuda.is_available():
+        print(prefix + 'No CUDA device')
+        return
+    if device is None:
+        device = torch.cuda.current_device()
+    torch.cuda.synchronize(device)
+    allocated = torch.cuda.memory_allocated(device)        # memory currently allocated by tensors
+    reserved  = torch.cuda.memory_reserved(device)         # memory managed by the caching allocator
+    max_alloc  = torch.cuda.max_memory_allocated(device)   # peak allocated by tensors
+    print(f"{prefix}GPU {device} allocated: {mb(allocated):.1f} MB, "
+          f"reserved: {mb(reserved):.1f} MB, peak_alloc: {mb(max_alloc):.1f} MB")
+    # optional: a readable summary
+    print(torch.cuda.memory_summary(device=device, abbreviated=True))
+
 
 
 if __name__ == '__main__':
