@@ -5,8 +5,10 @@ test/
 data_original/
 runs/
 checkpoint/
+result/
 
 # ignore python cache files
 __pycache__/
 *.pyc
+
 

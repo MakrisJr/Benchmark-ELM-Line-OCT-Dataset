@@ -9,9 +9,9 @@ from PIL import Image
 from torchvision import transforms
 from torch.autograd import Variable
 from efficientunet import *
-from data_vis import plot_img_and_mask
-from dataset_test import BasicDataset
-from all_transformers import *
+# from data_vis import plot_img_and_mask
+# from dataset_test import BasicDataset
+# from all_transformers import *
 from model import U_Net,AttU_Net, LinkNetImprove, U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet
 
 #model = get_efficientunet_b3(n_classes=1, concat_input=True, pretrained=True)
@@ -27,13 +27,22 @@ model = SegNet(n_channels=3, n_classes=1)
 if torch.cuda.is_available():
     model.cuda()
 
-model.load_state_dict(torch.load('checkpoint/model_epoch.pth'))
+MODEL_NAME = 'ELM_Nov-03-2025_2106.model'
+# model.load_state_dict(torch.load('checkpoint/model_epoch.pth'))
+model.load_state_dict(torch.load('checkpoint/' + MODEL_NAME))
 
 def is_image_file(filename):
     return any(filename.endswith(extension) for extension in [".png", ".jpg", ".jpeg"])
 
 image_dir = './test/image/'
 image_filenames = [x for x in os.listdir(image_dir) if is_image_file(x)]
+
+# create output directory
+if not os.path.exists(MODEL_NAME):
+    os.makedirs(MODEL_NAME)
+
+if not os.path.exists(MODEL_NAME + '/test_outputs/'):
+    os.makedirs(MODEL_NAME + '/test_outputs/')
 
 for image_name in image_filenames:
     #model.eval()
@@ -62,5 +71,5 @@ for image_name in image_filenames:
     out = np.expand_dims(out,0)
     out = np.transpose(out, (1, 2, 0))
     # out = cv2.resize(out,(w,h))
-    print (out.shape)
-    cv2.imwrite('result/'+image_name, 255*out)
+    # print (out.shape)
+    cv2.imwrite(MODEL_NAME + '/test_outputs/' + image_name, 255*out)
