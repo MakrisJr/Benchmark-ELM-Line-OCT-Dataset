@@ -114,3 +114,27 @@ def ELM_transform(normalize = True):
     ])
     }
     return transform
+
+
+def ELM_transform_gray(normalize = True):
+    # Training data mean: 54.76707466898142, std: 57.55662815500704 
+    # or from 0 to 1: mean: 0.2147, std: 0.2256
+    transform = {
+    'train': Compose([
+        #RandomHorizontallyFlip(),
+        #RandomRotate(5),
+        #ContrastAdjustment(1.2),
+        Resize((256,256)),
+        ToTensor(),
+        Normalization([0.2147],[0.2256])
+    ]),
+    'val': Compose([Resize((256,256)),
+        ToTensor(),
+        Normalization([0.2147],[0.2256])
+    ]),
+    'test': Compose([Resize((256,256)),
+        ToTensor(),
+        Normalization([0.2147],[0.2256])
+    ])
+    }
+    return transform
