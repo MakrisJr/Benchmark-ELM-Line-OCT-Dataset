@@ -150,12 +150,12 @@ class D3Dataset(Dataset):
                 mask = mask_slices[-1]  # Use last available slice
 
 
-            img_slices.append(np.array(img))
+            img_slices.append(np.array(img)) # each slice is 1 x H x W
             mask_slices.append(np.array(mask))
 
-        # Stack slices to create 3D volume
-        img_volume = np.stack(img_slices, axis=0)  # Shape: (49, H, W)
-        mask_volume = np.stack(mask_slices, axis=0)  # Shape: (49, H, W)
+        # Combine slices to create 3D volume
+        img_volume = np.concatenate(img_slices, axis=0) 
+        mask_volume = np.concatenate(mask_slices, axis=0)
 
-        return {'image': torch.tensor(img_volume, dtype=torch.float32),
-                'mask': torch.tensor(mask_volume, dtype=torch.float32)}
+        return {'image': torch.tensor(img_volume, dtype=torch.float32), # 1 x 49 x H x W
+                'mask': torch.tensor(mask_volume, dtype=torch.float32)} # 1 x 49 x H x W
