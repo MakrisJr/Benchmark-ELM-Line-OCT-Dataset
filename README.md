@@ -45,5 +45,27 @@ If you use the code in your work, please use the following citation:
 ### File guide: 
 - dataset.py: BasicDataset class, returns {image, mask} items
 - dice_loss.py: implements dice coefficient and dice loss
-- 
 
+
+## Utilities
+
+- stack_to_tif.py: stack 2D mask images (e.g., from `result/`) into a 3D multi-page TIF named `<name>_seg.tif` compatible with `holes_detection.py` and `line_check.py`.
+
+### Export a 3D _seg.tif from 2D predictions
+
+After running `predict.py`, masks are saved as individual 2D images under `result/`. To analyze them with `holes_detection.py` or `line_check.py`, stack them into a multi-page TIF:
+
+```
+python stack_to_tif.py --input-dir result --output IMAGES/EBU_seg.tif
+```
+
+Notes:
+- Images are sorted in natural numeric order to form the z-stack.
+- Output volume shape is [Z, H, W]. If predictions were resized (e.g., 256x256), the stacked TIF will have that size.
+
+
+- holes_detection.py: standalone utility, 
+
+
+image 605-19 is missing, I have copied 605-18 as a temporary fix
+same for 389-24 + 1 more 389 slice
