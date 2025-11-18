@@ -22,10 +22,10 @@ from torch import optim
 from tqdm import tqdm
 from torchvision import transforms
 from eval import eval_net
-from model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet, UNet2
+from model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet, UNet2, UNet3D
 from transformation import ELM_transform, ELM_transform_gray
 from tensorboardX import SummaryWriter
-from dataset import BasicDataset
+from dataset import BasicDataset, D3Dataset
 from torch.utils.data import DataLoader, random_split
 from dice_loss import Dice_Loss
 import torch.nn.functional as F
@@ -33,17 +33,7 @@ from efficientunet import *
 import matplotlib.pyplot as plt
 import csv
 
-#------------- Load the images from directory----------
-train_dir_img = './train/image/'
-train_dir_mask = './train/mask/'
-val_dir_img = './val/image/'
-val_dir_mask = './val/mask/'
-dir_checkpoint = './checkpoint/'
-# ------------------Loading END ------------------------
 
-n_classes =1
-n_channels = 1
-MODEL_NAME = f'ELM_{time.strftime("%b-%d-%Y_%H%M")}.model'
 
 def train_net(net,
               device,
@@ -52,12 +42,21 @@ def train_net(net,
               lr=0.0001,
               val_percent=0.1,
               save_cp=True,
-              img_scale=1):
+              img_scale=1,
+              args=None):
+    
+    model_name = args.model_name
+    base_dir = args.base_dir
+    train_dir_img = os.path.join(base_dir, 'data/train/image/')
+    train_dir_mask = os.path.join(base_dir, 'data/train/mask/')
+    val_dir_img = os.path.join(base_dir, 'data/val/image/')
+    val_dir_mask = os.path.join(base_dir, 'data/val/mask/')
+    dir_checkpoint = os.path.join(base_dir, 'elm-results/', model_name, 'checkpoints/')
     
     transform = ELM_transform_gray()
-    train_dataset = BasicDataset(train_dir_img, train_dir_mask, img_scale,transform = transform['train'], single_channel=True)
+    train_dataset = D3Dataset(train_dir_img, train_dir_mask, img_scale,transform = transform['train'])
 
-    val_dataset= BasicDataset(val_dir_img, val_dir_mask, img_scale,transform['val'], single_channel=True)
+    val_dataset= D3Dataset(val_dir_img, val_dir_mask, img_scale,transform['val'])
     n_train=len(train_dataset)
     n_val=len(val_dataset)
 
@@ -68,7 +67,7 @@ def train_net(net,
 
 
 
-    writer = SummaryWriter(logdir=f'{MODEL_NAME}/logs', comment=f'LR_{lr}_BS_{batch_size}_SCALE_{img_scale}')
+    writer = SummaryWriter(logdir=os.path.join(args.experiment_dir, 'logs'), comment=f'LR_{lr}_BS_{batch_size}_SCALE_{img_scale}')
     print('TensorBoard logs writing to:', writer.logdir)
     global_step = 0
 
@@ -108,6 +107,8 @@ def train_net(net,
                 imgs = imgs.to(device=device, dtype=torch.float32)
                 mask_type = torch.float32 if net.n_classes == 1 else torch.long
                 true_masks = true_masks.to(device=device, dtype=mask_type)
+
+                print(f"Input image size:", imgs.size())
 
                 masks_pred = net(imgs)
                 out_new =  F.sigmoid(masks_pred)
@@ -151,6 +152,7 @@ def train_net(net,
                     if val_score > best_acc:
                         best_acc = val_score
                         best_model_wts = copy.deepcopy(net.state_dict())
+                        best_epoch = epoch
 
                     writer.add_images('images', imgs, global_step)
                     if net.n_classes == 1:
@@ -159,14 +161,15 @@ def train_net(net,
 
     if save_cp:
         try:
-            os.mkdir(dir_checkpoint)
+            os.makedirs(os.path.join(dir_checkpoint), exist_ok=True)
             logging.info('Created checkpoint directory')
         except OSError:
             pass
         net.load_state_dict(best_model_wts)
         # t = time.localtime()
         # timestamp = time.strftime('%b-%d-%Y_%H%M', t)
-        torch.save(net.state_dict(), '{}{}.model'.format(dir_checkpoint, MODEL_NAME))
+        torch.save(net.state_dict(), '{}/checkpoints/{}_best_epoch_{}.pth'.format(args.experiment_dir, model_name, best_epoch))
+        logging.info(f'Checkpoint {best_epoch} saved !')
 
     writer.close()
 
@@ -185,6 +188,8 @@ def get_args():
                         help='Downscaling factor of the images')
     parser.add_argument('-v', '--validation', dest='val', type=float, default=15.0,
                         help='Percent of the data that is used as validation (0-100)')
+    parser.add_argument('-d', '--base_dir', dest='base_dir', type=str, default='./',
+                        help='Base files directory')
 
     return parser.parse_args()
 
@@ -213,7 +218,11 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     args = get_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logging.info(f'Using device {device}')   
+    logging.info(f'Using device {device}') 
+
+    n_classes =1 # number of output classes
+    n_channels = 1 # number of input channels (1 for grayscale, 3 for RGB)
+
 
 # -------------- Load the model -----------
     #net = get_efficientunet_b3(n_classes=1, concat_input=True, pretrained=True)
@@ -224,7 +233,22 @@ if __name__ == '__main__':
     #net = DeepLabv3_plus(n_channels=3, n_classes=1, os=16, pretrained=True, _print=True)
     #net = FCN(n_channels=3, n_classes=1)
     # net = SegNet(n_channels=3, n_classes=1)
-    net = UNet2(1,1)
+    # net = UNet2(1,1)
+    net = UNet3D(1,1)
+
+    MODEL_NAME = f'{net.__class__.__name__}_{time.strftime("%b-%d-%Y_%H%M")}_model'
+
+    experiment_dir = os.path.join(args.base_dir, 'elm-results/', MODEL_NAME)
+    if not os.path.exists(experiment_dir):
+        os.makedirs(experiment_dir)
+    if not os.path.exists(os.path.join(experiment_dir, 'checkpoints')):
+        os.makedirs(os.path.join(experiment_dir, 'checkpoints'))
+    logging.info(f'Experiment dir : {experiment_dir}')
+
+    # add model name to args
+    args.model_name = MODEL_NAME
+    args.experiment_dir = experiment_dir
+
 
     if args.load:
         net.load_state_dict(
@@ -239,9 +263,10 @@ if __name__ == '__main__':
                   lr=args.lr,
                   device=device,
                   img_scale=args.scale,
-                  val_percent=args.val / 100)
+                  val_percent=args.val / 100,
+                  args=args)
     except KeyboardInterrupt:
-        torch.save(net.state_dict(), f'{MODEL_NAME}/INTERRUPTED.pth')
+        torch.save(net.state_dict(), os.path.join(args.experiment_dir, 'checkpoints','INTERRUPTED_' + args.model_name + '.model'))
         logging.info('Saved interrupt')
         try:
             sys.exit(0)
