@@ -145,7 +145,7 @@ class D3Dataset(Dataset):
                     img, mask = self.transform(img, mask)
 
             except FileNotFoundError:
-                logging.warning(f"Missing slice {slice_idx} for eye {eye_id}. Using last available slice.")
+                # logging.warning(f"Missing slice {slice_idx} for eye {eye_id}. Using last available slice.")
                 img = img_slices[-1]  # Use last available slice
                 mask = mask_slices[-1]  # Use last available slice
 
@@ -154,8 +154,9 @@ class D3Dataset(Dataset):
             mask_slices.append(np.array(mask))
 
         # Combine slices to create 3D volume
-        img_volume = np.concatenate(img_slices, axis=0) 
-        mask_volume = np.concatenate(mask_slices, axis=0)
+        img_volume = np.concatenate(img_slices, axis=0)  # 49 x H x W 
+        mask_volume = np.concatenate(mask_slices, axis=0)  # 49 x H x W
+        # print(f"img dimsions for eye {eye_id}:", img_volume.shape)
 
-        return {'image': torch.tensor(img_volume, dtype=torch.float32), # 1 x 49 x H x W
-                'mask': torch.tensor(mask_volume, dtype=torch.float32)} # 1 x 49 x H x W
+        return {'image': torch.tensor(img_volume, dtype=torch.float32).unsqueeze(0), # 1 x 49 x H x W
+                'mask': torch.tensor(mask_volume, dtype=torch.float32).unsqueeze(0)} # 1 x 49 x H x W
