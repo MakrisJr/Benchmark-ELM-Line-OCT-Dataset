@@ -108,7 +108,7 @@ def train_net(net,
                 mask_type = torch.float32 if net.n_classes == 1 else torch.long
                 true_masks = true_masks.to(device=device, dtype=mask_type)
 
-                print(f"Input image size:", imgs.size())
+                # print(f"Input image size:", imgs.size())
 
                 masks_pred = net(imgs)
                 out_new =  F.sigmoid(masks_pred)
@@ -146,7 +146,7 @@ def train_net(net,
                         logging.info('Validation cross entropy: {}'.format(val_score))
                         writer.add_scalar('Loss/test', val_score, global_step)
                     else:
-                        logging.info('Validation Dice Coeff: {}'.format(val_score))
+                        # logging.info('Validation Dice Coeff: {}'.format(val_score))
                         writer.add_scalar('Dice/test', val_score, global_step)
                     
                     if val_score > best_acc:
@@ -154,10 +154,20 @@ def train_net(net,
                         best_model_wts = copy.deepcopy(net.state_dict())
                         best_epoch = epoch
 
-                    writer.add_images('images', imgs, global_step)
+                    if imgs.dim() == 5:
+                        B,C,D,H,W = imgs.shape
+                        # permute to (B, D, C, H, W) then flatten B and D into the batch dim
+                        imgs_to_write = imgs.permute(0, 2, 1, 3, 4).reshape(B * D, C, H, W)
+                        true_masts_to_write = true_masks.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
+                        masks_pred_to_write = masks_pred.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
+                    else:
+                        imgs_to_write = imgs
+
+                    writer.add_images('images', imgs_to_write, global_step)
+
                     if net.n_classes == 1:
-                        writer.add_images('masks/true', true_masks, global_step)
-                        writer.add_images('masks/pred', torch.sigmoid(masks_pred) > 0.5, global_step)
+                        writer.add_images('masks/true', true_masts_to_write, global_step)
+                        writer.add_images('masks/pred', torch.sigmoid(masks_pred_to_write) > 0.5, global_step)
 
     if save_cp:
         try:
