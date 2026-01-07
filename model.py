@@ -1,3 +1,4 @@
+from collections import OrderedDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -509,13 +510,15 @@ class U_Net(nn.Module):
 
 
 class R2U_Net(nn.Module):
-    def __init__(self,img_ch=3,output_ch=1,t=2):
+    def __init__(self,n_channels=3,n_classes=1,t=2):
         super(R2U_Net,self).__init__()
+        self.n_channels = n_channels
+        self.n_classes = n_classes
         
         self.Maxpool = nn.MaxPool2d(kernel_size=2,stride=2)
         self.Upsample = nn.Upsample(scale_factor=2)
 
-        self.RRCNN1 = RRCNN_block(ch_in=img_ch,ch_out=64,t=t)
+        self.RRCNN1 = RRCNN_block(ch_in=n_channels,ch_out=64,t=t)
 
         self.RRCNN2 = RRCNN_block(ch_in=64,ch_out=128,t=t)
         
@@ -538,7 +541,7 @@ class R2U_Net(nn.Module):
         self.Up2 = up_conv(ch_in=128,ch_out=64)
         self.Up_RRCNN2 = RRCNN_block(ch_in=128, ch_out=64,t=t)
 
-        self.Conv_1x1 = nn.Conv2d(64,output_ch,kernel_size=1,stride=1,padding=0)
+        self.Conv_1x1 = nn.Conv2d(64,n_classes,kernel_size=1,stride=1,padding=0)
 
 
     def forward(self,x):
@@ -2021,7 +2024,295 @@ class UNet3D_Aniso(nn.Module):
         d1 = self.dec1(torch.cat((u1, e1), dim=1))
 
         return self.final(d1)
+
+class UNet3D_Aniso2(nn.Module):
+    """
+    UNet3D with anisotropic pooling to preserve more depth resolution.
+    Pooling strides: (2,2,2), (2,2,2), (1,2,2), (1,2,2)
+    Corresponding upsampling uses the same strides reversed.
+    """
+    def __init__(self, in_channels=1, out_channels=1, base_filters=48):
+        super().__init__()
+        self.n_classes = out_channels
+
+        def conv_block(in_c, out_c):
+            return nn.Sequential(
+                nn.Conv3d(in_c, out_c, kernel_size=3, padding=1),
+                nn.BatchNorm3d(out_c),
+                nn.ReLU(inplace=True),
+                nn.Conv3d(out_c, out_c, kernel_size=3, padding=1),
+                nn.BatchNorm3d(out_c),
+                nn.ReLU(inplace=True),
+                nn.Conv3d(out_c, out_c, kernel_size=3, padding=1),
+                nn.BatchNorm3d(out_c),
+                nn.ReLU(inplace=True)
+            )
+
+        # anisotropic pooling kernels/strides
+        self.pool1 = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
+        self.pool2 = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
+        self.pool3 = nn.MaxPool3d(kernel_size=(2,2,2), stride=(2,2,2))
+        self.pool4 = nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
+
+        # Encoder
+        f = base_filters
+        self.enc1 = conv_block(in_channels, f)
+        self.enc2 = conv_block(f, f*2)
+        self.enc3 = conv_block(f*2, f*4)
+        self.enc4 = conv_block(f*4, f*8)
+
+        # Bottleneck
+        self.bottleneck = conv_block(f*8, f*16)
+
+        # Decoder - use ConvTranspose3d with matching strides
+        self.up4 = nn.ConvTranspose3d(f*16, f*8, kernel_size=(1,2,2), stride=(1,2,2))
+        self.dec4 = conv_block(f*16, f*8)
+
+        self.up3 = nn.ConvTranspose3d(f*8, f*4, kernel_size=(2,2,2), stride=(2,2,2), output_padding=(1,0,0))
+        self.dec3 = conv_block(f*8, f*4)
+
+        self.up2 = nn.ConvTranspose3d(f*4, f*2, kernel_size=(1,2,2), stride=(1,2,2))
+        self.dec2 = conv_block(f*4, f*2)
+
+        self.up1 = nn.ConvTranspose3d(f*2, f, kernel_size=(1,2,2), stride=(1,2,2), output_padding=(0,0,0))
+        self.dec1 = conv_block(f*2, f)
+
+        self.final = nn.Conv3d(f, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        # Encoder
+        e1 = self.enc1(x)         # 
+        p1 = self.pool1(e1)           
+        e2 = self.enc2(p1)       
+        p2 = self.pool2(e2)        
+        e3 = self.enc3(p2)      
+        p3 = self.pool3(e3)         
+        e4 = self.enc4(p3)           
+        p4 = self.pool4(e4)             
+        b = self.bottleneck(p4)         
+
+        # Decoder (reverse order of pooling)
+        u4 = self.up4(b)                # B x 8f x 12 x 32 x 32
+        d4 = self.dec4(torch.cat((u4, e4), dim=1))
+
+        u3 = self.up3(d4)               # B x 4f x 12 x 64 x 64
+        d3 = self.dec3(torch.cat((u3, e3), dim=1))
+
+        u2 = self.up2(d3)               # B x 2f x 24 x 128 x 128
+        d2 = self.dec2(torch.cat((u2, e2), dim=1))
+
+        u1 = self.up1(d2)               # B x f x 49 x 256 x 256 (may need output_padding)
+        # if up1 produces 48 in depth, you may need output_padding=(1,0,0) depending on input dims
+        # concatenate with e1
+        d1 = self.dec1(torch.cat((u1, e1), dim=1))
+
+        return self.final(d1)
     
+class SliceAttention(nn.Module):
+    def __init__(self, dim, num_heads=4, max_slices=128):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.norm = nn.LayerNorm(dim)
+
+        # ----- Learned absolute positional embeddings -----
+        self.pos_embed = nn.Parameter(torch.randn(1, max_slices, dim))
+
+    def forward(self, x):
+        """
+        x: B x C x Z x H x W
+        """
+        B, C, Z, H, W = x.shape
+
+        # 1) flatten spatial dims
+        tokens = x.mean(dim=(3,4))      # B x C x Z
+        tokens = tokens.permute(0, 2, 1)  # B x Z x C
+
+        # 2) add positional embeddings (crop to Z)
+        tokens = tokens + self.pos_embed[:, :Z, :]
+
+        # 3) attention
+        attn_out, _ = self.attn(tokens, tokens, tokens)
+        out = self.norm(attn_out + tokens)
+
+        # 4) broadcast back to 3D volume
+        out = out.permute(0, 2, 1).unsqueeze(-1).unsqueeze(-1)
+        out = out.expand(B, C, Z, H, W)
+        return out
+    
+class ZAxialAttention(nn.Module):
+    """
+    Efficient true Z-mixing attention.
+    Performs self-attention along Z independently at each downsampled spatial location.
+
+    Steps:
+      1. Spatial downsample (adaptive pooling): (H,W) -> (ds,ds)
+      2. For each (x,y), do attention along Z: sequence length = Z
+      3. Upsample the attended volume back to original spatial resolution
+    """
+
+    def __init__(self, dim, num_heads=4, ds=16):
+        """
+        dim        — feature channels (e.g., 1024 in your bottleneck)
+        num_heads  — attention heads
+        ds         — spatial downsample Resolution (ds x ds grid)
+        """
+        super().__init__()
+        self.ds = ds
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim, num_heads=num_heads, batch_first=True
+        )
+
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        """
+        x: (B, C, Z, H, W)
+        Output: same shape, but with Z attentively mixed.
+        """
+        B, C, Z, H, W = x.shape
+
+        # ----------------------------
+        # 1. Spatial Downsample
+        # ----------------------------
+        # pool over spatial dims only → keeps Z unchanged
+        # result: B, C, Z, ds, ds
+        x_ds = F.adaptive_avg_pool3d(x, (Z, self.ds, self.ds))
+
+        # rearrange for axial attention along Z
+        # create (ds*ds) sequences, each of length Z
+        x_ds = x_ds.permute(0, 3, 4, 2, 1)   # B, ds, ds, Z, C
+        seqs = x_ds.reshape(B * self.ds * self.ds, Z, C)  # (B*ds*ds), Z, C
+
+        # ----------------------------
+        # 2. Apply Attention Along Z
+        # ----------------------------
+        attn_out, _ = self.attn(seqs, seqs, seqs)
+        attn_out = self.norm(attn_out + seqs)
+
+        # reshape back to grid
+        out = attn_out.reshape(B, self.ds, self.ds, Z, C)
+        out = out.permute(0, 4, 3, 1, 2)  # B, C, Z, ds, ds
+
+        # ----------------------------
+        # 3. Upsample Back to (H,W)
+        # ----------------------------
+        out = F.interpolate(
+            out, size=(Z, H, W),
+            mode="trilinear",
+            align_corners=False
+        )
+
+        return out
+
+class UNet2D_attention(nn.Module):
+    def __init__(self, in_channels=1, out_channels=1, num_heads=4):
+        super().__init__()
+        self.n_classes = out_channels
+
+        # ---------- 2D building blocks ----------
+        def conv_block(in_c, out_c):
+            return nn.Sequential(
+                nn.Conv2d(in_c, out_c, 3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_c, out_c, 3, padding=1),
+                nn.ReLU(inplace=True)
+            )
+
+        def upsample(in_c, out_c):
+            return nn.ConvTranspose2d(in_c, out_c, kernel_size=2, stride=2)
+
+        # ---------- Encoder ----------
+        self.enc1 = conv_block(in_channels, 64)
+        self.enc2 = conv_block(64, 128)
+        self.enc3 = conv_block(128, 256)
+        self.enc4 = conv_block(256, 512)
+
+        self.pool = nn.MaxPool2d(2, 2)
+        self.bottleneck = conv_block(512, 1024)
+
+        # ---------- Slice Attention at bottleneck ----------
+        self.slice_attn = ZAxialAttention(dim=1024, num_heads=num_heads)
+
+        # ---------- Decoder ----------
+        self.up4 = upsample(1024, 512)
+        self.dec4 = conv_block(1024, 512)
+
+        self.up3 = upsample(512, 256)
+        self.dec3 = conv_block(512, 256)
+
+        self.up2 = upsample(256, 128)
+        self.dec2 = conv_block(256, 128)
+
+        self.up1 = upsample(128, 64)
+        self.dec1 = conv_block(128, 64)
+
+        self.final = nn.Conv2d(64, out_channels, 1)
+
+    def _process_slices_2d(self, x, module, pool=None):
+        """
+        Applies a 2D module slice-wise.
+        x: B x C x Z x H x W
+        Returns: B x C' x Z x H' x W'
+        """
+        B, C, Z, H, W = x.shape
+        x = x.permute(0, 2, 1, 3, 4)                # B x Z x C x H x W
+        x = x.reshape(B * Z, C, H, W)               # (B*Z) x C x H x W
+
+        x = module(x)                               # run 2D block
+
+        if pool is not None:
+            x = pool(x)
+        C_out, H_out, W_out = x.shape[1], x.shape[2], x.shape[3]
+        x = x.reshape(B, Z, C_out, H_out, W_out)
+        x = x.permute(0, 2, 1, 3, 4)                # B x C_out x Z x H_out x W_out
+        return x
+    
+    def _upsample_and_concat(self, x, skip, up_module):
+        B, C, Z, H, W = x.shape
+        x = x.permute(0, 2, 1, 3, 4)                # B x Z x C x H x W
+        x = x.reshape(B * Z, C, H, W)               # (B*Z) x C x
+
+        x = up_module(x)                             # upsample
+        _, C_up, H_up, W_up = x.shape
+
+        x = x.reshape(B, Z, C_up, H_up, W_up)
+        x = x.permute(0, 2, 1, 3, 4)                # B x C_up x Z x H_up x W_up
+        x = torch.cat([x, skip], dim=1)             # concat with skip connection
+        return x
+
+    def forward(self, x):
+        """
+        x shape: B x C x Z x H x W   (e.g. B x 1 x 49 x 256 x 256)
+        """
+
+        # ---------- Encoder ----------
+        e1 = self._process_slices_2d(x, self.enc1)
+        e2 = self._process_slices_2d(e1, self.enc2, pool=self.pool)
+        e3 = self._process_slices_2d(e2, self.enc3, pool=self.pool)
+        e4 = self._process_slices_2d(e3, self.enc4, pool=self.pool)
+
+        b = self._process_slices_2d(e4, self.bottleneck, pool=self.pool)
+        # ---------- Z-Axis Attention ----------
+        b = self.slice_attn(b)
+
+        # ---------- Decoder ----------
+        d4 = self._upsample_and_concat(b, e4, self.up4)
+        d4 = self._process_slices_2d(d4, self.dec4)
+
+        d3 = self._upsample_and_concat(d4, e3, self.up3)
+        d3 = self._process_slices_2d(d3, self.dec3)
+
+        d2 = self._upsample_and_concat(d3, e2, self.up2)
+        d2 = self._process_slices_2d(d2, self.dec2)
+
+        d1 = self._upsample_and_concat(d2, e1, self.up1)
+        d1 = self._process_slices_2d(d1, self.dec1)
+
+        # ---------- Final per-slice segmentation ----------
+        out = self._process_slices_2d(d1, self.final)  # B x out_channels x Z x H x W
+
+        return out
+
 # Frawley's 3D Unet proposal for macular hole segmentation
 # https://github.com/gliff-ai/robust-3d-unet-macular-holes/blob/main/src/models/unet_3d_proposal.py
 class UNet3DFrawley(torch.nn.Module):
@@ -2113,3 +2404,410 @@ class UNet3DFrawley(torch.nn.Module):
         x = self.conv_up_02(x)
 
         return x
+
+
+
+
+# Multi-Scale Guided Unet with MGR module. From https://github.com/Jiaxuan-Li/MGU-Net
+class GCN(nn.Module):
+    def __init__(self, num_state, num_node, bias=False):
+        super(GCN, self).__init__()
+        self.conv1 = nn.Conv1d(num_node, num_node, kernel_size=1, padding=0,
+                               stride=1, groups=1, bias=True)
+        self.relu = nn.LeakyReLU(0.2,inplace=True)
+        self.conv2 = nn.Conv1d(num_state, num_state, kernel_size=1, padding=0,
+                               stride=1, groups=1, bias=bias)
+
+    def forward(self, x):
+        h = self.conv1(x.permute(0, 2, 1).contiguous()).permute(0, 2, 1)
+        h = h + x
+        h = self.relu(h)
+        h = self.conv2(h)
+        return h
+
+class Basconv(nn.Sequential):
+    def __init__(self, in_channels, out_channels, is_batchnorm = False, kernel_size = 3, stride = 1, padding=1):
+        super(Basconv, self).__init__()
+        if is_batchnorm:
+            self.conv = nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding),nn.BatchNorm2d(out_channels),nn.ReLU(inplace=True))
+        else:
+            self.conv = nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding),nn.ReLU(inplace=True))
+
+        # initialise the blocks
+        for m in self.children():
+            init_weights(m, init_type='kaiming')
+    
+    def forward(self, inputs):
+        x = inputs
+        x = self.conv(x)
+        return x
+
+class GloRe_Unit(nn.Module):
+
+    def __init__(self, num_in, num_mid, stride=(1,1), kernel=1):
+        super(GloRe_Unit, self).__init__()
+
+        self.num_s = int(2 * num_mid)
+        self.num_n = int(1 * num_mid)
+        kernel_size = (kernel, kernel)
+        padding = (1, 1) if kernel == 3 else (0, 0)
+        # reduce dimension
+        self.conv_state = Basconv(num_in, self.num_s, is_batchnorm = True, kernel_size=kernel_size, padding=padding)  
+        # generate projection and inverse projection functions
+        self.conv_proj = Basconv(num_in, self.num_n, is_batchnorm = True,kernel_size=kernel_size, padding=padding)   
+        self.conv_reproj = Basconv(num_in, self.num_n, is_batchnorm = True,kernel_size=kernel_size, padding=padding)  
+        # reasoning by graph convolution
+        self.gcn1 = GCN(num_state=self.num_s, num_node=self.num_n)   
+        self.gcn2 = GCN(num_state=self.num_s, num_node=self.num_n)  
+        # fusion
+        self.fc_2 = nn.Conv2d(self.num_s, num_in, kernel_size=kernel_size, padding=padding, stride=(1,1), 
+                              groups=1, bias=False)
+        self.blocker = nn.BatchNorm2d(num_in) 
+
+    def forward(self, x):
+        batch_size = x.size(0)
+        # generate projection and inverse projection matrices
+        x_state_reshaped = self.conv_state(x).view(batch_size, self.num_s, -1) 
+        x_proj_reshaped = self.conv_proj(x).view(batch_size, self.num_n, -1)
+        x_rproj_reshaped = self.conv_reproj(x).view(batch_size, self.num_n, -1)
+        # project to node space
+        x_n_state1 = torch.bmm(x_state_reshaped, x_proj_reshaped.permute(0, 2, 1)) 
+        x_n_state2 = x_n_state1 * (1. / x_state_reshaped.size(2))
+        # graph convolution
+        x_n_rel1 = self.gcn1(x_n_state2)  
+        x_n_rel2 = self.gcn2(x_n_rel1)
+        # inverse project to original space
+        x_state_reshaped = torch.bmm(x_n_rel2, x_rproj_reshaped)
+        x_state = x_state_reshaped.view(batch_size, self.num_s, *x.size()[2:])
+        # fusion
+        out = x + self.blocker(self.fc_2(x_state))
+
+        return out
+
+class  MGR_Module(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(MGR_Module, self).__init__()
+
+        self.conv0_1 = Basconv(in_channels=in_channels, out_channels=out_channels, kernel_size=3, padding=1)
+        self.glou0 = nn.Sequential(OrderedDict([("GCN%02d" % i, GloRe_Unit(out_channels, out_channels, kernel=1)) for i in range(1)]))
+
+        self.conv1_1 = Basconv(in_channels=in_channels,out_channels=out_channels, kernel_size=3, padding=1)
+        self.pool1 = nn.MaxPool2d(kernel_size=[2, 2], stride=2)
+        self.conv1_2 = Basconv(in_channels=out_channels, out_channels=out_channels, kernel_size=3, padding=1)
+        self.glou1 = nn.Sequential(OrderedDict([("GCN%02d" % i,GloRe_Unit(out_channels, out_channels, kernel=1)) for i in range(1)]))
+
+        self.conv2_1 = Basconv(in_channels=in_channels, out_channels=out_channels, kernel_size=3, padding=1)
+        self.pool2 = nn.MaxPool2d(kernel_size=[3, 3], stride=3)
+        self.conv2_2 = Basconv(in_channels=out_channels, out_channels=out_channels, kernel_size=3, padding=1)
+        self.glou2 = nn.Sequential(OrderedDict([("GCN%02d" % i,GloRe_Unit(out_channels, int(out_channels/2), kernel=1)) for i in range(1)]))
+
+        self.conv3_1 = Basconv(in_channels=in_channels, out_channels=out_channels, kernel_size=3, padding=1)
+        self.pool3 = nn.MaxPool2d(kernel_size=[5, 5], stride=5)
+        self.conv3_2 = Basconv(in_channels=out_channels, out_channels=out_channels, kernel_size=3, padding=1)
+        self.glou3 = nn.Sequential(OrderedDict([("GCN%02d" % i,GloRe_Unit(out_channels, int(out_channels/2), kernel=1)) for i in range(1)]))
+        
+        self.f1 = Basconv(in_channels=4*out_channels, out_channels=in_channels, kernel_size=1, padding=0)
+
+    def forward(self, x):
+        self.in_channels, h, w = x.size(1), x.size(2), x.size(3)
+
+        self.x0 = self.conv0_1(x)
+        self.g0 = self.glou0(self.x0)
+
+        self.x1 = self.conv1_2(self.pool1(self.conv1_1(x)))
+        self.g1 = self.glou1(self.x1)
+        self.layer1 = F.interpolate(self.g1, size=(h, w), mode='bilinear', align_corners=True)
+
+        self.x2 = self.conv2_2(self.pool2(self.conv2_1(x)))
+        self.g2 = self.glou2(self.x2)
+        self.layer2 = F.interpolate(self.g2, size=(h, w), mode='bilinear', align_corners=True)
+
+        self.x3 = self.conv3_2(self.pool3(self.conv3_1(x)))
+        self.g3= self.glou3(self.x3)
+        self.layer3 = F.interpolate(self.g3, size=(h, w), mode='bilinear', align_corners=True)
+
+        out = torch.cat([self.g0, self.layer1, self.layer2, self.layer3], 1)
+
+        return self.f1(out)
+
+class UnetConv(nn.Module):
+    def __init__(self, in_channels, out_channels, is_batchnorm, n=2, kernel_size = 3, stride=1, padding=1):
+        super(UnetConv, self).__init__()
+        self.n = n
+
+        if is_batchnorm:
+            for i in range(1, n+1):
+                conv = nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding),
+                                     nn.BatchNorm2d(out_channels),
+                                     nn.ReLU(inplace=True),)
+                setattr(self, 'conv%d'%i, conv)
+                in_channels = out_channels
+
+        else:
+            for i in range(1, n+1):
+                conv = nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding),
+                                     nn.ReLU(inplace=True),)
+                setattr(self, 'conv%d'%i, conv)
+                in_channels = out_channels
+
+        # initialise the blocks
+        for m in self.children():
+            init_weights(m, init_type='kaiming')
+
+    def forward(self, inputs):
+        x = inputs
+        for i in range(1, self.n+1):
+            conv = getattr(self, 'conv%d'%i)
+            x = conv(x)
+        return x
+
+class UnetUp(nn.Module):
+    def __init__(self,in_channels, out_channels, is_deconv, n_concat=2):
+        super(UnetUp, self).__init__()
+        self.conv = UnetConv(in_channels+(n_concat-2)* out_channels, out_channels, False)
+        if is_deconv:
+            self.up = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1)
+        else:
+            self.up = nn.UpsamplingBilinear2d(scale_factor=2)
+
+        # initialise the blocks
+        for m in self.children():
+            if m.__class__.__name__.find('UnetConv') != -1: continue
+            init_weights(m, init_type='kaiming')
+
+    def forward(self, inputs0,*input):
+        outputs0 = self.up(inputs0)
+        for i in range(len(input)):
+            outputs0 = torch.cat([outputs0,input[i]], 1)
+        return self.conv(outputs0)
+    
+
+class MGUNet_2(nn.Module):
+    def __init__(self, in_channels=1, n_classes=1, feature_scale=4, is_deconv=True, is_batchnorm=True):  ##########
+        super(MGUNet_2, self).__init__()
+        self.n_classes = n_classes
+        self.is_deconv = is_deconv
+        self.in_channels = in_channels
+        self.is_batchnorm = is_batchnorm
+        self.feature_scale = feature_scale
+
+        filters = [64, 128, 256, 512, 1024]
+        filters = [int(x / self.feature_scale) for x in filters]
+
+        # encoder
+        self.conv1 = UnetConv(self.in_channels, filters[0], self.is_batchnorm)
+        self.maxpool1 = nn.MaxPool2d(kernel_size=2)
+
+        self.conv2 = UnetConv(filters[0], filters[1], self.is_batchnorm)
+        self.maxpool2 = nn.MaxPool2d(kernel_size=2)
+
+        self.conv3 = UnetConv(filters[1], filters[2], self.is_batchnorm)
+        self.maxpool3 = nn.MaxPool2d(kernel_size=2)
+
+        self.mgb =  MGR_Module(filters[2], filters[3])
+
+        self.center = UnetConv(filters[2], filters[3], self.is_batchnorm)
+
+        # decoder
+        self.up_concat3 = UnetUp(filters[3], filters[2], self.is_deconv)
+        self.up_concat2 = UnetUp(filters[2], filters[1], self.is_deconv)
+        self.up_concat1 = UnetUp(filters[1], filters[0], self.is_deconv)
+
+        # final conv
+        self.final_1 = nn.Conv2d(filters[0], n_classes, 1)
+
+        # initialise weights
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                init_weights(m, init_type='kaiming')
+            elif isinstance(m, nn.BatchNorm2d):
+                init_weights(m, init_type='kaiming')
+
+    def forward(self, inputs):
+        conv1 = self.conv1(inputs)  
+        maxpool1 = self.maxpool1(conv1) 
+        conv2 = self.conv2(maxpool1)
+        maxpool2 = self.maxpool2(conv2)  
+        conv3 = self.conv3(maxpool2)  
+        maxpool3 = self.maxpool3(conv3)  
+        feat_sum = self.mgb(maxpool3) 
+        center = self.center(feat_sum)  
+        up3 = self.up_concat3(center, conv3) 
+        up2 = self.up_concat2(up3, conv2) 
+        up1 = self.up_concat1(up2, conv1)
+        final_1 = self.final_1(up1)
+
+        return final_1
+
+
+# ---------------------------
+# Loss-friendly building blocks
+# ---------------------------
+
+class ConvBlock2D(nn.Module):
+    """(Conv2d -> ReLU) * 2"""
+    def __init__(self, in_c: int, out_c: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_c, out_c, kernel_size=3, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class ConvBlock3D(nn.Module):
+    """(Conv3d -> ReLU) * 2, default full 3x3x3 (mixes slices)."""
+    def __init__(self, in_c: int, out_c: int, kz: int = 3):
+        """
+        kz:
+          - 3 => kernel (3,3,3) full 3D mixing
+          - 1 => kernel (1,3,3) no slice mixing
+        """
+        super().__init__()
+        assert kz in (1, 3)
+        k = (kz, 3, 3)
+        p = (kz // 2, 1, 1)
+        self.net = nn.Sequential(
+            nn.Conv3d(in_c, out_c, kernel_size=k, padding=p, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_c, out_c, kernel_size=k, padding=p, bias=False),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def upsample_inplane(in_c: int, out_c: int) -> nn.Module:
+    """Upsample H/W only, keep depth D unchanged."""
+    return nn.ConvTranspose3d(in_c, out_c, kernel_size=(1, 2, 2), stride=(1, 2, 2), bias=False)
+
+
+# ---------------------------
+# Hybrid 2D-encoder / 3D-decoder U-Net
+# ---------------------------
+
+class UNet2DEnc3DDec(nn.Module):
+    """
+    2D encoder per slice + 3D decoder for volumetric coherence.
+
+    Input : B x C x D x H x W
+    Output: B x out_channels x D x H x W (logits)
+
+    Design:
+      - Encoder: 2D convs with 2D pooling (downsample H/W only) per slice
+      - Decoder: 3D upsampling (H/W only) + 3D conv blocks
+      - Slice mixing: controlled by kz in decoder blocks (default: mix at bottleneck, keep high-res aniso)
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        out_channels: int = 1,
+        base: int = 64,
+        # anisotropy-friendly defaults:
+        # mix slices at coarse scales; avoid excessive mixing at full-res
+        kz_bottleneck: int = 3,   # 3 => mix slices at bottleneck
+        kz_dec4: int = 3,         # H/8
+        kz_dec3: int = 3,         # H/4
+        kz_dec2: int = 1,         # H/2
+        kz_dec1: int = 1,         # H
+    ):
+        super().__init__()
+        self.n_classes = out_channels
+
+        # 2D encoder (shared across slices)
+        self.enc1 = ConvBlock2D(in_channels, base)        # 64
+        self.enc2 = ConvBlock2D(base, base * 2)           # 128
+        self.enc3 = ConvBlock2D(base * 2, base * 4)       # 256
+        self.enc4 = ConvBlock2D(base * 4, base * 8)       # 512
+        self.pool2d = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        self.bottleneck2d = ConvBlock2D(base * 8, base * 16)  # 1024
+
+        # 3D bottleneck mixing (after stacking)
+        self.bottleneck3d = ConvBlock3D(base * 16, base * 16, kz=kz_bottleneck)
+
+        # 3D decoder (upsample in-plane only)
+        self.up4 = upsample_inplane(base * 16, base * 8)
+        self.dec4 = ConvBlock3D(base * 16, base * 8, kz=kz_dec4)
+
+        self.up3 = upsample_inplane(base * 8, base * 4)
+        self.dec3 = ConvBlock3D(base * 8, base * 4, kz=kz_dec3)
+
+        self.up2 = upsample_inplane(base * 4, base * 2)
+        self.dec2 = ConvBlock3D(base * 4, base * 2, kz=kz_dec2)
+
+        self.up1 = upsample_inplane(base * 2, base)
+        self.dec1 = ConvBlock3D(base * 2, base, kz=kz_dec1)
+
+        self.final = nn.Conv3d(base, out_channels, kernel_size=1)
+
+    @staticmethod
+    def _to_slice_batch(x: torch.Tensor) -> torch.Tensor:
+        """
+        B x C x D x H x W -> (B*D) x C x H x W
+        """
+        B, C, D, H, W = x.shape
+        return x.permute(0, 2, 1, 3, 4).contiguous().view(B * D, C, H, W)
+
+    @staticmethod
+    def _to_volume(f: torch.Tensor, B: int, D: int) -> torch.Tensor:
+        """
+        (B*D) x C x H x W -> B x C x D x H x W
+        """
+        BD, C, H, W = f.shape
+        assert BD == B * D, f"Expected BD={B*D}, got {BD}"
+        return f.view(B, D, C, H, W).permute(0, 2, 1, 3, 4).contiguous()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: B x C x D x H x W
+        """
+        B, C, D, H, W = x.shape
+
+        # --- 2D encoder per slice ---
+        xs = self._to_slice_batch(x)  # (B*D, C, H, W)
+
+        e1s = self.enc1(xs)           # (B*D, base, H, W)
+        p1 = self.pool2d(e1s)         # (B*D, base, H/2, W/2)
+
+        e2s = self.enc2(p1)           # (B*D, 2*base, H/2, W/2)
+        p2 = self.pool2d(e2s)         # (B*D, 2*base, H/4, W/4)
+
+        e3s = self.enc3(p2)           # (B*D, 4*base, H/4, W/4)
+        p3 = self.pool2d(e3s)         # (B*D, 4*base, H/8, W/8)
+
+        e4s = self.enc4(p3)           # (B*D, 8*base, H/8, W/8)
+        p4 = self.pool2d(e4s)         # (B*D, 8*base, H/16, W/16)
+
+        bs = self.bottleneck2d(p4)    # (B*D, 16*base, H/16, W/16)
+
+        # --- stack to 3D volumes ---
+        e1 = self._to_volume(e1s, B, D)  # B x base x D x H x W
+        e2 = self._to_volume(e2s, B, D)  # B x 2b  x D x H/2 x W/2
+        e3 = self._to_volume(e3s, B, D)  # B x 4b  x D x H/4 x W/4
+        e4 = self._to_volume(e4s, B, D)  # B x 8b  x D x H/8 x W/8
+        b  = self._to_volume(bs,  B, D)  # B x 16b x D x H/16 x W/16
+
+        # --- 3D bottleneck mixing ---
+        b = self.bottleneck3d(b)
+
+        # --- 3D decoder ---
+        u4 = self.up4(b)                          # B x 8b x D x H/8  x W/8
+        d4 = self.dec4(torch.cat([u4, e4], 1))     # B x 8b x D x H/8  x W/8
+
+        u3 = self.up3(d4)                         # B x 4b x D x H/4  x W/4
+        d3 = self.dec3(torch.cat([u3, e3], 1))     # B x 4b x D x H/4  x W/4
+
+        u2 = self.up2(d3)                         # B x 2b x D x H/2  x W/2
+        d2 = self.dec2(torch.cat([u2, e2], 1))     # B x 2b x D x H/2  x W/2
+
+        u1 = self.up1(d2)                         # B x b x D x H    x W
+        d1 = self.dec1(torch.cat([u1, e1], 1))     # B x b x D x H    x W
+
+        return self.final(d1)                     # B x out_channels x D x H x W
