@@ -15,3 +15,6 @@ __pycache__/
 
 *logs*
 *.pth
+*/test_outputs/*
+eval-3d-outputs/
+nnUNet_raw/
