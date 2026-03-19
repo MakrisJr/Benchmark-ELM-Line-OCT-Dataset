@@ -22,17 +22,47 @@ from torch import optim
 from tqdm import tqdm
 from torchvision import transforms
 from eval import eval_net
-from model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet, UNet2, UNet2D_attention, UNet3D, UNet3D_Aniso, UNet3D_Aniso2, UNet3DFrawley, MGUNet_2, UNet2DEnc3DDec
+from model import U_Net,AttU_Net,LinkNetImprove,U2NETP,R2U_Net,DeepLabv3_plus,FCN,SegNet, UNet2, UNet2D_attention, UNet3D, UNet3D_Aniso, UNet3D_Aniso2, UNet3DFrawley, MGUNet_2, UNet2DEnc3DDec, CSAM_UNet2p5D, UNet2p5D_SlidingWindow, SwinUNETR3D
 from transformation import ELM_transform, ELM_transform_gray
 from tensorboardX import SummaryWriter
 from dataset import BasicDataset, D3Dataset
 from torch.utils.data import DataLoader, random_split
-from dice_loss import Dice_Loss
+from dice_loss import dice_loss
 import torch.nn.functional as F
 from efficientunet import *
 import matplotlib.pyplot as plt
 import csv
 
+
+def tversky_loss(prob, target, alpha=0.3, beta=0.7, smooth=1e-6):
+    """
+    prob: sigmoid(logits), shape = [B, 1, ...]
+    target: ground truth mask, shape = [B, 1, ...]
+    """
+    prob = prob.float()
+    target = target.float()
+    
+    dims = tuple(range(2, prob.ndim))
+    
+    tp = torch.sum(prob * target, dims)
+    fp = torch.sum(prob * (1 - target), dims)
+    fn = torch.sum((1 - prob) * target, dims)
+
+    tversky = (tp + smooth) / (tp + alpha * fp + beta * fn + smooth)
+    return 1 - tversky.mean()
+
+def tv_smoothness_z(prob: torch.Tensor, mask: torch.Tensor = None):
+    """
+    prob: B x 1 x D x H x W (after sigmoid)
+    mask: same shape, 1 where smoothness applies
+    """
+    dz = torch.abs(prob[:, :, 1:, :, :] - prob[:, :, :-1, :, :])
+
+    if mask is not None:
+        mz = mask[:, :, 1:, :, :] * mask[:, :, :-1, :, :]
+        dz = dz * mz
+
+    return dz.mean()
 
 
 def train_net(net,
@@ -40,17 +70,16 @@ def train_net(net,
               epochs=15,
               batch_size=4,
               lr=0.0001,
-              val_percent=0.1,
               save_cp=True,
               img_scale=1,
               args=None):
     
     model_name = args.model_name
     base_dir = args.base_dir
-    train_dir_img = os.path.join(base_dir, 'data/train/image/')
-    train_dir_mask = os.path.join(base_dir, 'data/train/mask/')
-    val_dir_img = os.path.join(base_dir, 'data/val/image/')
-    val_dir_mask = os.path.join(base_dir, 'data/val/mask/')
+    train_dir_img = os.path.join(base_dir, 'data_no_anomalies/train/image/')
+    train_dir_mask = os.path.join(base_dir, 'data_no_anomalies/train/mask/')
+    val_dir_img = os.path.join(base_dir, 'data_no_anomalies/val/image/')
+    val_dir_mask = os.path.join(base_dir, 'data_no_anomalies/val/mask/')
     dir_checkpoint = os.path.join(base_dir, 'elm-results/', model_name, 'checkpoints/')
     
     transform_train = True
@@ -82,21 +111,47 @@ def train_net(net,
     ''')
 
 # !!---------- Defined the optimizer --------------------------!!
+    if net.__class__.__name__.startswith("SwinUNETR"):
+        encoder_params = []
+        decoder_params = []
 
-    optimizer = optim.Adam(net.parameters(), lr = lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-9)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min' if net.n_classes > 1 else 'max', factor = 0.2, patience=10)
+        for name, param in net.model.named_parameters():
+            if name.startswith("swinViT"):
+                encoder_params.append(param)
+            else:
+                decoder_params.append(param)
 
+        print("encoder tensors:", len(encoder_params))
+        print("decoder/head tensors:", len(decoder_params))
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": encoder_params, "lr": 1e-5},
+                {"params": decoder_params, "lr": 1e-4},
+            ],
+            weight_decay=1e-5,
+        )
+    else:
+        optimizer = optim.Adam(net.parameters(), lr = lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-9)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.2, patience=10
+    )
 # ------------------ Loss function ------------------!!
-    criterion_dice = Dice_Loss
-    criterion = nn.BCEWithLogitsLoss().cuda()
+    criterion_dice = dice_loss
+    criterion = nn.BCEWithLogitsLoss().to(device=device)
+    # criterion_tversky = tversky_loss
     
 # !!-------------- Training and validation loop ------------------!!
     best_acc=0
+    csv_path = os.path.join(args.experiment_dir, 'training_log.csv')
+    with open(csv_path, mode='w', newline='') as csv_file:
+        writer_csv = csv.writer(csv_file)
+        writer_csv.writerow(['epoch', 'train_loss', 'val_dice', 'learning_rate'])
+
     for epoch in range(epochs):
         net.train()
-
         epoch_loss = 0
-        with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img') as pbar:
+
+        with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs - 1}', unit='img') as pbar:
             for ibatch, batch in enumerate(train_loader):
                 imgs = batch['image']
                 true_masks = batch['mask']
@@ -106,58 +161,80 @@ def train_net(net,
 
                 # print(f"Input image size:", imgs.size())
 
-                masks_pred = net(imgs)
-                out_new =  F.sigmoid(masks_pred)
+                masks_pred = net(imgs) 
+                out_new =  torch.sigmoid(masks_pred)
 
                 loss = 0.5*criterion(masks_pred, true_masks) + 0.5*criterion_dice(out_new, true_masks)
                 epoch_loss += loss.item()
-                writer.add_scalar('Loss/', loss.item(), global_step)
+
+                writer.add_scalar('Loss/train_batch', loss.item(), global_step)
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_value_(net.parameters(), 0.1)
+                nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0) # clip_grad_norm_ more stable than clip_grad_value_, for 3D networks.
                 optimizer.step()
 
                 if epoch == 0 and ibatch == 1:
                     print_gpu_mem(device)
                 pbar.update(imgs.shape[0])
                 global_step += 1
-                if global_step % ((n_val+n_train) // (2 * batch_size)) == 0:
-                    for tag, value in net.named_parameters():
-                        tag = tag.replace('.', '/')
-                        writer.add_histogram('weights/' + tag, value.data.cpu().numpy(), global_step)
-                        #writer.add_histogram('grads/' + tag, value.grad.data.cpu().numpy(), global_step)
-                    val_score = eval_net(net, val_loader, device)
-                    scheduler.step(val_score)
-                    writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], global_step)
 
-                    if net.n_classes > 1:
-                        logging.info('Validation cross entropy: {}'.format(val_score))
-                        writer.add_scalar('Loss/val', val_score, global_step)
-                    else:
-                        # logging.info('Validation Dice Coeff: {}'.format(val_score))
-                        writer.add_scalar('Dice/val', val_score, global_step)
-                    
-                    if val_score > best_acc:
-                        best_acc = val_score
-                        best_model_wts = copy.deepcopy(net.state_dict())
-                        best_epoch = epoch
 
-                    if imgs.dim() == 5:
-                        B,C,D,H,W = imgs.shape
-                        # permute to (B, D, C, H, W) then flatten B and D into the batch dim
-                        imgs_to_write = imgs.permute(0, 2, 1, 3, 4).reshape(B * D, C, H, W)
-                        true_masks_to_write = true_masks.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
-                        masks_pred_to_write = masks_pred.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
-                    else:
-                        imgs_to_write = imgs
 
-                    writer.add_images('images', imgs_to_write, global_step)
+            epoch_loss_avg = epoch_loss / max(1, len(train_loader))
 
-                    if net.n_classes == 1:
-                        writer.add_images('masks/true', true_masks_to_write, global_step)
-                        writer.add_images('masks/pred', torch.sigmoid(masks_pred_to_write) > 0.5, global_step)
+            # Validation once per epoch:
+            with torch.no_grad():
+                val_score = eval_net(net, val_loader, device)
+            
+            scheduler.step(val_score) # step the scheduler based on validation score
+            current_lr = optimizer.param_groups[0]['lr']
+
+            # TensorBoard logging
+            writer.add_scalar('Loss/train_epoch', epoch_loss_avg, epoch)
+            if net.n_classes == 1: 
+                writer.add_scalar('Dice/val_epoch', val_score, epoch)
+            else:
+                writer.add_scalar('Loss/val_epoch', val_score, epoch)
+            writer.add_scalar('learning_rate_epoch', current_lr, epoch)
+            # optional - histograms of weights and gradients
+            if (epoch + 1) % 5 == 0: # can change to log every N epochs
+                for tag, value in net.named_parameters():
+                    tag = tag.replace('.', '/')
+                    writer.add_histogram('weights/' + tag, value.data.cpu().numpy(), epoch)
+            # log images:
+            if imgs.dim() == 5:
+                B,C,D,H,W = imgs.shape
+                # permute to (B, D, C, H, W) then flatten B and D into the batch dim
+                imgs_to_write = imgs.permute(0, 2, 1, 3, 4).reshape(B * D, C, H, W)
+                true_masks_to_write = true_masks.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
+                masks_pred_to_write = masks_pred.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
+            else:
+                imgs_to_write = imgs
+                true_masks_to_write = true_masks
+                masks_pred_to_write = masks_pred
+
+            writer.add_images('images', imgs_to_write, epoch)
+            if net.n_classes == 1:
+                writer.add_images('masks/true', true_masks_to_write, epoch)
+                writer.add_images('masks/pred', (torch.sigmoid(masks_pred_to_write) > 0.5).float(), epoch)
+            
+            if val_score > best_acc:
+                best_acc = val_score
+                best_model_wts = copy.deepcopy(net.state_dict())
+                best_epoch = epoch
+
+            # CSV logging:
+            with open(csv_path, mode='a', newline='') as csv_file:
+                writer_csv = csv.writer(csv_file)
+                writer_csv.writerow([epoch, epoch_loss_avg, val_score, current_lr])
+
+            logging.info(
+                f"Epoch {epoch}/{epochs-1} | "
+                f"TrainLoss={epoch_loss_avg:.6f} | ValScore={float(val_score):.6f} | LR={current_lr:.2e}"
+            )
+
 
     if save_cp:
         try:
@@ -239,7 +316,10 @@ if __name__ == '__main__':
     # net = MGUNet_2(in_channels=1, out_channels=1, feature_scale=4, is_deconv=True, is_batchnorm=True)
     # net = UNet3D_Aniso2(1,1)
     # net = UNet2D_attention(in_channels=1, out_channels=1)
-    net = UNet2DEnc3DDec(in_channels=1, out_channels=1)
+    # net = UNet2DEnc3DDec(in_channels=1, out_channels=1)
+    # net = CSAM_UNet2p5D(in_channels=1, out_channels=1, num_layers=3, base_num=32, semantic=True, positional=True, slice_att=True)
+    # net = UNet2p5D_SlidingWindow(k=7, out_channels=1, num_layers=3, base_num=32, pad_mode="replicate")
+    net = SwinUNETR3D(in_channels=1, n_classes=1, pretrained_path="./checkpoint/model_swinvit_UNETR.pt")
 
     MODEL_NAME = f'{net.__class__.__name__}_{time.strftime("%b-%d-%Y_%H%M")}_model'
 
@@ -268,7 +348,6 @@ if __name__ == '__main__':
                   lr=args.lr,
                   device=device,
                   img_scale=args.scale,
-                  val_percent=args.val / 100,
                   args=args)
     except KeyboardInterrupt:
         torch.save(net.state_dict(), os.path.join(args.experiment_dir, 'checkpoints','INTERRUPTED_' + args.model_name + '.model'))
