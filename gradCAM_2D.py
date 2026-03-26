@@ -16,6 +16,8 @@ from model import (
     DeepLabv3_plus, FCN, SegNet, SwinEncoderUNet2D
 )
 
+EYE_ID = ["919", "945", "990"]
+SLICE_INDEX = [24, 25, 48]
 
 # -----------------------------
 # Utilities
@@ -223,7 +225,8 @@ def save_outputs(
 # -----------------------------
 def main():
     parser = argparse.ArgumentParser(description="Grad-CAM for OCT ELM segmentation")
-    parser.add_argument("--image", type=str, required=True, help="Path to input OCT image")
+    parser.add_argument("--eye-id", type=str, nargs="+", default=EYE_ID, help="Eye IDs, e.g. 919 945 990")
+    parser.add_argument("--slice-index", type=int, nargs="+", default=SLICE_INDEX, help="Slice indices, e.g. 24 25 48")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pth checkpoint")
     parser.add_argument("--model-name", type=str, default="SwinEncoderUNet2D",
                         choices=[
@@ -239,66 +242,66 @@ def main():
     device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
 
     model = build_model(args.model_name, args.checkpoint, device)
-    input_tensor, rgb_img, gray_img = load_image_as_tensor(
-        args.image,
-        img_size=args.img_size,
-        single_channel=False,
-        device=device
-    )
-
-    # Forward once to get segmentation target mask
-    with torch.no_grad():
-        logits = model(input_tensor)
-        probs = torch.sigmoid(logits)[0, 0].detach().cpu().numpy()
-
-    pred_mask = (probs > args.threshold).astype(np.float32)
-
-    # If prediction is empty, fall back to full map target
-    target_mask = pred_mask
-    if target_mask.sum() == 0:
-        target_mask = np.ones_like(pred_mask, dtype=np.float32)
-
-    target_mask_t = torch.from_numpy(target_mask).to(device=device, dtype=torch.float32)
-    targets = [SemanticSegmentationTarget(category=0, mask=target_mask_t)]
-
     target_layer = get_default_target_layer(model, args.model_name)
 
-    with GradCAM(model=model, target_layers=[target_layer]) as cam:
-        grayscale_cam = cam(input_tensor=input_tensor, targets=targets)[0]
+    for eye_id in args.eye_id:
+        for slice_idx in args.slice_index:
+            image_path = os.path.join("data_no_anomalies/test/image", f"{eye_id}-{slice_idx}.png")
 
-    cam_overlay = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
-    rgb_u8 = np.uint8(np.clip(rgb_img * 255.0, 0, 255))
-    cv2.imwrite(
-        os.path.join(args.out_dir, "debug_input.png"),
-        cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2BGR),
-    )
+            if not os.path.exists(image_path):
+                print(f"[MISSING] {image_path}")
+                continue
 
-    base_name = os.path.splitext(os.path.basename(args.image))[0]
-    save_outputs(
-        out_dir=args.out_dir,
-        base_name=f"{base_name}_{args.model_name}",
-        rgb_img=rgb_img,
-        pred_prob=probs,
-        pred_mask=pred_mask,
-        cam_overlay=cam_overlay,
-    )
+            input_tensor, rgb_img, gray_img = load_image_as_tensor(
+                image_path,
+                img_size=args.img_size,
+                single_channel=False,
+                device=device
+            )
 
-    print(f"Saved Grad-CAM outputs to: {args.out_dir}")
+            # Forward once to get segmentation target mask
+            with torch.no_grad():
+                logits = model(input_tensor)
+                probs = torch.sigmoid(logits)[0, 0].detach().cpu().numpy()
+
+            pred_mask = (probs > args.threshold).astype(np.float32)
+
+            # If prediction is empty, fall back to full map target
+            target_mask = pred_mask
+            if target_mask.sum() == 0:
+                target_mask = np.ones_like(pred_mask, dtype=np.float32)
+
+            target_mask_t = torch.from_numpy(target_mask).to(device=device, dtype=torch.float32)
+            targets = [SemanticSegmentationTarget(category=0, mask=target_mask_t)]
+
+            with GradCAM(model=model, target_layers=[target_layer]) as cam:
+                grayscale_cam = cam(input_tensor=input_tensor, targets=targets)[0]
+
+            cam_overlay = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
+            rgb_u8 = np.uint8(np.clip(rgb_img * 255.0, 0, 255))
+            cv2.imwrite(
+                os.path.join(args.out_dir, f"debug_input_{eye_id}-{slice_idx}.png"),
+                cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2BGR),
+            )
+
+            base_name = f"{eye_id}-{slice_idx}"
+            save_outputs(
+                out_dir=args.out_dir,
+                base_name=f"{base_name}_{args.model_name}",
+                rgb_img=rgb_img,
+                pred_prob=probs,
+                pred_mask=pred_mask,
+                cam_overlay=cam_overlay,
+            )
+
+            print(f"Saved Grad-CAM outputs for {eye_id}-{slice_idx} to: {args.out_dir}")
 
 
 if __name__ == "__main__":
     main()
 
-
 """
 python gradCAM_2D.py \
-  --image data_no_anomalies/test/image/919-24.png \
-  --checkpoint elm-results/SwinEncoderUNet2D_Mar-16-2026_1515_model/checkpoints/SwinEncoderUNet2D_Mar-16-2026_1515_model_best_epoch_20.pth \
-  --model-name SwinEncoderUNet2D \
-  --out-dir elm-results/SwinEncoderUNet2D_Mar-16-2026_1515_model/gradcam_outputs
-
-python gradCAM_2D.py \
-  --image data_no_anomalies/test/image/945-25.png \
   --checkpoint elm-results/SwinEncoderUNet2D_Mar-16-2026_1515_model/checkpoints/SwinEncoderUNet2D_Mar-16-2026_1515_model_best_epoch_20.pth \
   --model-name SwinEncoderUNet2D \
   --out-dir elm-results/SwinEncoderUNet2D_Mar-16-2026_1515_model/gradcam_outputs
@@ -309,4 +312,8 @@ python gradCAM_2D.py \
   --model-name SegNet \
   --out-dir elm-results/SegNet_Feb-16-2026_1745_model/gradcam_outputs
 
+  python gradCAM_2D.py \
+  --checkpoint elm-results/SegNet_Feb-16-2026_1745_model/checkpoints/SegNet_Feb-16-2026_1745_model_best_epoch_39.pth \
+  --model-name SegNet \
+  --out-dir elm-results/SegNet_Feb-16-2026_1745_model/gradcam_outputs
 """

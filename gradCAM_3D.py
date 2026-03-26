@@ -15,6 +15,7 @@ from model import (
     UNet3D,
     UNet3D_Aniso,
     UNet2p5D_SlidingWindow,
+    SwinUNETR3D,
 )
 
 # -----------------------------
@@ -24,7 +25,8 @@ EYE_ID = ["919", "945", "990"]
 SLICE_INDEX = [24,25,48]
 # TARGET_LAYERS = ["conv_up_00", "conv_up_01", "conv_bottom_21"] # UNet3DFrawley
 # TARGET_LAYERS = ["dec1", "dec2", "bottleneck3d"] # UNet2DEnc3DDec
-TARGET_LAYERS = ["encoder.attn.4", "decoder.blocks.0"] # CSAM_UNet2p5D
+# TARGET_LAYERS = ["encoder.attn.4", "decoder.blocks.0"] # CSAM_UNet2p5D
+TARGET_LAYERS = ["model.decoder1", "model.decoder2", "model.decoder3"] # SwinUNETR3D
 
 
 # -----------------------------
@@ -260,6 +262,8 @@ def build_model(model_name: str, checkpoint_path: str, device):
             base_num=32,
             pad_mode="replicate",
         )
+    elif model_name == "SwinUNETR3D":
+        net = SwinUNETR3D(in_channels=1, n_classes=1)
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
@@ -547,4 +551,5 @@ python gradCAM_3D.py   --base_dir ./   --checkpoint elm-results/CSAM_UNet2p5D_Fe
 
 python gradCAM_3D.py   --base_dir ./   --checkpoint elm-results/CSAM_UNet2p5D_Feb-25-2026_1113_model/checkpoints/CSAM_UNet2p5D_Feb-25-2026_1113_model_best_epoch_95.pth   --model CSAM_UNet2p5D   --out_dir elm-results/CSAM_UNet2p5D_Feb-25-2026_1113_model/gradcam_outputs
 
+python gradCAM_3D.py   --base_dir ./   --checkpoint elm-results/SwinUNETR3D_Mar-19-2026_1246_model/checkpoints/SwinUNETR3D_Mar-19-2026_1246_model_best_epoch_91.pth   --model SwinUNETR3D   --out_dir elm-results/SwinUNETR3D_Mar-19-2026_1246_model/gradcam_outputs
 """
