@@ -55,7 +55,7 @@ def make_2d_transforms(train: bool, out_size=(256, 256)):
     else:
         return A.Compose([resize, normalize, to_tensor])
 
-class BasicDataset(Dataset):
+class BasicDataset_old(Dataset):
     def __init__(self, imgs_dir, masks_dir, scale=1,transform = None, single_channel = False):
         self.imgs_dir = imgs_dir
         self.masks_dir = masks_dir
@@ -152,6 +152,178 @@ class BasicDataset(Dataset):
         else:
             mask = torch.from_numpy((mask>0).astype(np.float32)).unsqueeze(0)
         return {'image': img,'mask': mask}
+
+
+class BasicDataset(Dataset):
+    def __init__(
+        self,
+        root_dir="data_no_anomalies",
+        split=None,            # None, "train", or "val"
+        fold=None,             # integer fold index, required if split is train/val
+        scale=1.0,
+        transform=None,
+        single_channel=False,
+        image_dir="all/image",
+        mask_dir="all/mask",
+        metadata_filename="metadata.csv",
+        image_ext=".png",      # change if your files are .jpg, .tif, etc.
+        mask_ext=".png",
+    ):
+        self.root_dir = Path(root_dir)
+        self.image_dir = self.root_dir / image_dir
+        self.mask_dir = self.root_dir / mask_dir
+        self.metadata_path = self.root_dir / metadata_filename
+
+        self.scale = scale
+        self.transform = transform
+        self.single_channel = single_channel
+        self.image_ext = image_ext
+        self.mask_ext = mask_ext
+
+        assert 0 < scale <= 1, "Scale must be between 0 and 1"
+
+        if not self.metadata_path.exists():
+            raise FileNotFoundError(f"Metadata file not found: {self.metadata_path}")
+        if not self.image_dir.exists():
+            raise FileNotFoundError(f"Image directory not found: {self.image_dir}")
+        if not self.mask_dir.exists():
+            raise FileNotFoundError(f"Mask directory not found: {self.mask_dir}")
+
+        # Read metadata
+        df = pd.read_csv(self.metadata_path, dtype={"patient_id": str})
+
+        required_cols = {"patient_id", "fold"}
+        missing = required_cols - set(df.columns)
+        if missing:
+            raise ValueError(f"metadata.csv is missing required columns: {missing}")
+
+        # Normalize patient IDs like 004, 012, etc.
+        df["patient_id"] = df["patient_id"].astype(str).str.strip().str.zfill(3)
+
+        # Apply split filtering
+        if split is not None:
+            if split not in {"train", "val"}:
+                raise ValueError("split must be one of: None, 'train', 'val'")
+            if fold is None:
+                raise ValueError("fold must be provided when split is 'train' or 'val'")
+
+            if split == "train":
+                df = df[df["fold"] != fold].copy()
+            elif split == "val":
+                df = df[df["fold"] == fold].copy()
+
+        # Keep only patients that have both image and mask files
+        valid_rows = []
+        for _, row in df.iterrows():
+            pid = row["patient_id"]
+            img_path = self.image_dir / f"{pid}{self.image_ext}"
+            mask_path = self.mask_dir / f"{pid}{self.mask_ext}"
+
+            if not img_path.exists():
+                logging.warning(f"Skipping {pid}: image not found at {img_path}")
+                continue
+            if not mask_path.exists():
+                logging.warning(f"Skipping {pid}: mask not found at {mask_path}")
+                continue
+
+            valid_rows.append(
+                {
+                    "patient_id": pid,
+                    "fold": int(row["fold"]),
+                    "image_path": img_path,
+                    "mask_path": mask_path,
+                }
+            )
+
+        self.meta = pd.DataFrame(valid_rows).reset_index(drop=True)
+
+        logging.info(
+            f"Creating dataset with {len(self.meta)} examples "
+            f"(root={self.root_dir}, split={split}, fold={fold})"
+        )
+
+    def __len__(self):
+        return len(self.meta)
+
+    @classmethod
+    def preprocess(cls, pil_img, scale):
+        w, h = pil_img.size
+        newW, newH = int(scale * w), int(scale * h)
+        assert newW > 0 and newH > 0, "Scale is too small"
+
+        pil_img = pil_img.resize((newW, newH))
+        img_nd = np.array(pil_img)
+
+        if len(img_nd.shape) == 2:
+            img_nd = np.expand_dims(img_nd, axis=2)
+
+        # HWC -> CHW
+        img_trans = img_nd.transpose((2, 0, 1))
+
+        if img_trans.max() > 1:
+            img_trans = img_trans / 255.0
+
+        return img_trans
+
+    def __getitem__(self, i):
+        row = self.meta.iloc[i]
+
+        patient_id = row["patient_id"]
+        img_path = row["image_path"]
+        mask_path = row["mask_path"]
+
+        img = Image.open(img_path)
+        mask = Image.open(mask_path)
+
+        if img.size != mask.size:
+            raise ValueError(
+                f"Image and mask {patient_id} should be the same size, "
+                f"but are {img.size} and {mask.size}"
+            )
+
+        mask = mask.convert("L")
+        if self.single_channel:
+            img = img.convert("L")
+        else:
+            img = img.convert("RGB")
+
+        if self.scale != 1.0:
+            w, h = img.size
+            newW, newH = int(self.scale * w), int(self.scale * h)
+            if newW <= 0 or newH <= 0:
+                raise ValueError("Scale is too small")
+
+            img = img.resize((newW, newH))
+            mask = mask.resize((newW, newH), resample=Image.NEAREST)
+
+        img = np.array(img)
+        mask = np.array(mask).astype(np.uint8)
+
+        if self.transform is not None:
+            out = self.transform(image=img, mask=mask)
+            img, mask = out["image"], out["mask"]
+        else:
+            # Manual conversion if no transform is provided
+            if img.ndim == 2:
+                img = np.expand_dims(img, axis=2)
+            img = img.transpose((2, 0, 1)).astype(np.float32)
+            if img.max() > 1:
+                img = img / 255.0
+            img = torch.from_numpy(img)
+
+        if torch.is_tensor(mask):
+            mask = (mask > 0).float()
+            if mask.ndim == 2:
+                mask = mask.unsqueeze(0)
+        else:
+            mask = torch.from_numpy((mask > 0).astype(np.float32)).unsqueeze(0)
+
+        return {
+            "patient_id": patient_id,
+            "fold": int(row["fold"]),
+            "image": img,
+            "mask": mask,
+        }
     
 """
 The 3D dataset stacks the 49 slices of the OCT into a 3D volume with dimensions 49 x H x W 

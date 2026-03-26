@@ -8,13 +8,8 @@ from tqdm import tqdm
 import  csv
 
 from dataset import D3Dataset
-from model import CSAM_UNet2p5D, UNet3DFrawley, UNet2DEnc3DDec, UNet3D, UNet3D_Aniso, UNet2p5D_SlidingWindow
-
-try:
-    from scipy import ndimage as ndi
-except ImportError:
-    print("Scipy not found")
-    ndi = None
+from model import CSAM_UNet2p5D, UNet3DFrawley, UNet2DEnc3DDec, UNet3D, UNet3D_Aniso, UNet2p5D_SlidingWindow, SwinUNETR3D
+from scipy import ndimage as ndi
 
 EXPORT_ONLY = True
 EXPORT_EYES = {"919", "945", "990"}     # example
@@ -358,6 +353,8 @@ def main():
         net = CSAM_UNet2p5D(in_channels=1, out_channels=1, num_layers=5, base_num=32, semantic=True, positional=True, slice_att=True)
     elif args.model == "UNet2p5D_SlidingWindow":
         net = UNet2p5D_SlidingWindow(k=7, out_channels=1, num_layers=3, base_num=32, pad_mode="replicate")
+    elif args.model == "SwinUNETR3D":
+        net = SwinUNETR3D(in_channels=1, n_classes=1)
     else:
         raise ValueError(f"Unknown model: {args.model}")
 
@@ -599,4 +596,7 @@ python predict3D.py --base_dir . --checkpoint /home/s2036401/Benchmark-ELM-Line-
 python predict3D.py --base_dir . --checkpoint /home/s2036401/Benchmark-ELM-Line-OCT-Dataset/elm-results/CSAM_UNet2p5D_Feb-25-2026_1113_model/checkpoints/CSAM_UNet2p5D_Feb-25-2026_1113_model_best_epoch_95.pth --model CSAM_UNet2p5D --batch_size 1 --num_workers 1 --threshold 0.5 --save_preds --out_dir ./elm-results/CSAM_UNet2p5D_Feb-25-2026_1113_model/out --tol 2
 
 python predict3D.py --base_dir . --checkpoint /home/s2036401/Benchmark-ELM-Line-OCT-Dataset/elm-results/UNet2p5D_SlidingWindow_Feb-25-2026_1352_model/checkpoints/UNet2p5D_SlidingWindow_Feb-25-2026_1352_model_best_epoch_90.pth --model UNet2p5D_SlidingWindow --batch_size 1 --num_workers 1 --threshold 0.5 --save_preds --out_dir ./elm-results/UNet2p5D_SlidingWindow_Feb-25-2026_1352_model/out --tol 2
+
+python predict3D.py --base_dir . --checkpoint elm-results/SwinUNETR3D_Mar-19-2026_1246_model/checkpoints/SwinUNETR3D_Mar-19-2026_1246_model_best_epoch_91.pth --model SwinUNETR3D --batch_size 1 --num_workers 1 --threshold 0.5 --save_preds --out_dir ./elm-results/SwinUNETR3D_Mar-19-2026_1246_model/out --tol 2
+
 """

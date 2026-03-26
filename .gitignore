@@ -19,3 +19,5 @@ __pycache__/
 eval-3d-outputs/
 nnUNet_raw/
 eval-window-outputs/*
+data_no_anomalies/all/image/*
+data_no_anomalies/all/mask/*
